@@ -1,0 +1,14 @@
+[project]
+name = "conveyor-petri-net-simulation"
+version = "1.0.0"
+requires-python = "==3.14.*"
+dependencies = []
+
+[tool.uv]
+package = false
+
+[tool.uv.workspace]
+members = ["engine", "model", "analysis"]
+
+[tool.ty.environment]
+python = ".venv"

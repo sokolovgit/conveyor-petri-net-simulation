@@ -1,0 +1,23 @@
+[project]
+name = "b17-analysis"
+version = "0.1.0"
+description = "Курсова B17: верифікація моделі та експериментальне дослідження"
+requires-python = "==3.14.*"
+dependencies = [
+    "numpy>=1.26",
+    "scipy>=1.13",
+    "pandas>=2.2",
+    "spn-engine",
+    "b17-conveyor",
+]
+
+[tool.uv.sources]
+spn-engine = { workspace = true }
+b17-conveyor = { workspace = true }
+
+[build-system]
+requires = ["uv_build>=0.8,<0.14"]
+build-backend = "uv_build"
+
+[tool.uv.build-backend]
+module-name = ["verification", "experiments", "petrinet"]
