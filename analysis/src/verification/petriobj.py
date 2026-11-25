@@ -48,10 +48,8 @@ def petriobj(path: Path) -> list[dict]:
 def metrics(run: dict, n: int, lam: float) -> dict:
     p, t = run["p"], run["t"]
     done = sum(p[f"N{i}"][1] for i in range(1, n + 1))
-    in_system = (
-        p["A0"][0]
-        + sum(p[f"A{i}"][0] + p[f"B{i}"][0] for i in range(1, n + 1))
-        + sum(v[0] for k, v in t.items() if k.startswith(("Обробка", "Переїзд", "Повернення")))
+    in_system = sum(p[f"A{i}"][0] + p[f"B{i}"][0] for i in range(1, n + 1)) + sum(
+        v[0] for k, v in t.items() if k.startswith(("Обробка", "Переїзд", "Повернення"))
     )
     q = done / T
     return {

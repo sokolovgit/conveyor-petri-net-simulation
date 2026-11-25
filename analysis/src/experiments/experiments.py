@@ -8,15 +8,16 @@ from conveyor import (
     ConveyorNet,
     ConveyorParams,
     ConveyorResult,
+    ConveyorStats,
     Run,
     build,
     replications,
     run_all,
 )
 from scipy import stats
-from spn import Observer, Part, Simulator
+from spn import Observer, Simulator
 
-WARMUP, DURATION, OVER_DURATION, RUNS, SEED = 1_000.0, 20_000.0, 4_000.0, 80, 1
+WARMUP, DURATION, OVER_DURATION, RUNS, SEED = 2_000.0, 30_000.0, 4_000.0, 80, 1
 EPS_REL, PILOT_SEEDS, PILOT_UNTIL, OVER_UNTIL, PILOT_STEP = 0.10, 5, 60_000.0, 5_000.0, 250.0
 SCREEN_RUNS, SCREEN_ALPHA, FINAL_TOP, TOTAL_BUFFER, DEVICES = 10, 0.001, 10, 10, range(3, 9)
 FINAL_SEED, WINDOW = SEED + SCREEN_RUNS, 500.0
@@ -40,14 +41,15 @@ LAWS = {
 }
 
 
-class Released(Observer):
-    def __init__(self) -> None:
+class Released(ConveyorStats):
+    def __init__(self, model: ConveyorNet) -> None:
+        super().__init__(model, warmup=0.0)
         self.t: list[float] = []
         self.w: list[float] = []
 
-    def released(self, part: Part, t: float) -> None:
+    def _release(self, t: float, w: float, before_service: float) -> None:
         self.t.append(t)
-        self.w.append(t - part.t_in)
+        self.w.append(w)
 
 
 class BusySampler(Observer):
@@ -65,21 +67,24 @@ def overloaded(params: ConveyorParams) -> bool:
     return params.lam * params.t_ob >= params.n
 
 
-def _trajectory(task: tuple[str, ConveyorParams, int]) -> pd.DataFrame:
-    name, params, seed = task
-    until = OVER_UNTIL if overloaded(params) else PILOT_UNTIL
+def _trajectory(task: tuple[str, ConveyorParams, int, float]) -> pd.DataFrame:
+    name, params, seed, until = task
     model = build(params)
-    log = Released()
-    Simulator(model.net, seed=seed, observers=[log]).run(until)
+    log = Released(model)
+    Simulator(model, seed=seed, observers=[log]).run(until)
     t, w = np.array(log.t), np.cumsum(log.w)
     grid = np.arange(PILOT_STEP, until + PILOT_STEP / 2, PILOT_STEP)
     k = np.searchsorted(t, grid, side="right")
     return pd.DataFrame({"config": name, "seed": seed, "t": grid, "W": w[k - 1] / k, "Q": k / grid})
 
 
-def trajectories(configs: Mapping[str, ConveyorParams] = PILOT) -> pd.DataFrame:
+def trajectories(
+    configs: Mapping[str, ConveyorParams] = PILOT, until: float = PILOT_UNTIL
+) -> pd.DataFrame:
     tasks = [
-        (name, params, SEED + s) for name, params in configs.items() for s in range(PILOT_SEEDS)
+        (name, params, SEED + s, OVER_UNTIL if overloaded(params) else until)
+        for name, params in configs.items()
+        for s in range(PILOT_SEEDS)
     ]
     with ProcessPoolExecutor() as pool:
         return pd.concat(pool.map(_trajectory, tasks), ignore_index=True)
@@ -134,7 +139,7 @@ def base_runs() -> tuple[pd.DataFrame, pd.DataFrame, pd.Series, pd.Series]:
 
 
 def _shift(result: ConveyorResult) -> np.ndarray:
-    return np.rint(np.array(result.sojourn) - np.array(result.tau)).astype(int)
+    return np.rint(np.array(result.before_service)).astype(int)
 
 
 def cycle_shares(sample: np.ndarray, params: ConveyorParams = BASE, groups: int = 4) -> pd.Series:
@@ -215,7 +220,7 @@ def _busy_series(task: tuple[int, float]) -> np.ndarray:
     seed, step = task
     model = build(BASE)
     sampler = BusySampler(model, step, WARMUP)
-    Simulator(model.net, seed=seed, observers=[sampler]).run(WARMUP + DURATION)
+    Simulator(model, seed=seed, observers=[sampler]).run(WARMUP + DURATION)
     return np.array(sampler.values)
 
 

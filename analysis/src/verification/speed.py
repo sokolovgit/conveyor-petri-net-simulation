@@ -3,22 +3,14 @@ from statistics import median
 
 from conveyor import ConveyorParams, ConveyorStats, build
 from spn import Simulator
-from spn.simulator import SIMULTANEITY
 
 UNTIL, REPEATS, SEED = 21_000.0, 3, 1
 
 
 class FullScan(Simulator):
-    def run(self, until: float) -> None:
-        if not self._started:
-            self._started = True
-            self._enter_all(self.net.transitions)
-        calendar = self._calendar
-        while calendar and calendar[0][0] <= until + SIMULTANEITY:
-            self._advance(calendar[0][0])
-            self._exit_due()
-            self._enter_all(self.net.transitions)
-        self._advance(until)
+    def transform(self) -> None:
+        self._exit()
+        self._enter(self.net.transitions)
 
 
 def _timed(engine: type[Simulator], params: ConveyorParams) -> tuple[float, float]:
@@ -27,7 +19,7 @@ def _timed(engine: type[Simulator], params: ConveyorParams) -> tuple[float, floa
         model = build(params)
         stats = ConveyorStats(model, warmup=0.0)
         start = time.perf_counter()
-        engine(model.net, seed=SEED, observers=[stats]).run(UNTIL)
+        engine(model, seed=SEED, observers=[stats]).run(UNTIL)
         times.append(time.perf_counter() - start)
         sojourn = stats.result().sojourn_mean
     return median(times), sojourn

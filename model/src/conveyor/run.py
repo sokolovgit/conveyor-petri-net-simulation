@@ -20,7 +20,7 @@ def simulate(
 ) -> ConveyorResult:
     model = build(params)
     stats = ConveyorStats(model, warmup=warmup, keep_sojourn=keep_sojourn)
-    Simulator(model.net, seed=seed, observers=[stats, *observers]).run(warmup + duration)
+    Simulator(model, seed=seed, observers=[stats, *observers]).run(warmup + duration)
     return stats.result()
 
 

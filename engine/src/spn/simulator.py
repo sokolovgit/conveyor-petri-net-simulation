@@ -1,22 +1,15 @@
 import heapq
+import math
 from collections.abc import Iterable, Sequence
 from operator import attrgetter
 from random import Random
-from typing import TypeAlias
 
 from spn.net import Net, Place, Transition
 from spn.observers import Observer
-from spn.part import Part
 
 SIMULTANEITY = 1e-9
 
-_Event: TypeAlias = tuple[float, int, Transition, Part | None]
-
 _by_index = attrgetter("index")
-
-
-def _by_entry(event: _Event) -> int:
-    return event[1]
 
 
 def _by_priority(transitions: Iterable[Transition]) -> list[list[Transition]]:
@@ -27,80 +20,85 @@ def _by_priority(transitions: Iterable[Transition]) -> list[list[Transition]]:
 
 
 class Simulator:
+    tolerance = SIMULTANEITY
+
     def __init__(self, net: Net, *, seed: int, observers: Sequence[Observer] = ()) -> None:
         self.net = net
-        self.rng = Random(seed)
-        self._order = Random(f"{seed}:order")
+        self.seed = seed
+        self._streams: dict[str, Random] = {}
+        self._order = self.stream("order")
         self._observers = tuple(observers)
-        self._calendar: list[_Event] = []
+        self._nearest: list[tuple[float, int, Transition]] = []
         self._seq = 0
         self._started = False
         self.t = 0.0
 
+    def stream(self, name: str) -> Random:
+        rng = self._streams.get(name)
+        if rng is None:
+            rng = self._streams[name] = Random(f"{self.seed}:{name}")
+        return rng
+
     def run(self, until: float) -> None:
         if not self._started:
             self._started = True
-            self._enter_all(self.net.transitions)
-        calendar = self._calendar
-        while calendar and calendar[0][0] <= until + SIMULTANEITY:
-            self._advance(calendar[0][0])
-            changed = self._exit_due()
-            ready = {tr for p in changed for tr in p.consumers}
-            self._enter_all(ready)
-        self._advance(until)
+            self._enter(self.net.transitions)
+        while self.nearest() <= until + self.tolerance:
+            t_next = self.nearest()
+            self._collect(t_next)
+            self.t = t_next
+            self.transform()
+        self._collect(until)
+        self.t = max(self.t, until)
 
-    def _advance(self, t: float) -> None:
+    def nearest(self) -> float:
+        return self._nearest[0][0] if self._nearest else math.inf
+
+    def transform(self) -> None:
+        changed = self._exit()
+        self._enter(self.net.consumers(changed))
+
+    def _collect(self, t: float) -> None:
         if t > self.t:
             for obs in self._observers:
                 obs.advance(self.t, t)
-            self.t = t
 
-    def _exit_due(self) -> set[Place]:
-        due: list[_Event] = []
-        calendar = self._calendar
-        while calendar and calendar[0][0] <= self.t + SIMULTANEITY:
-            due.append(heapq.heappop(calendar))
-        due.sort(key=_by_entry)
+    def _exit(self) -> set[Place]:
+        due: list[tuple[float, Transition]] = []
+        while self.nearest() <= self.t + self.tolerance:
+            moment, _, tr = heapq.heappop(self._nearest)
+            due.append((moment, tr))
+        self._order.shuffle(due)
         changed: set[Place] = set()
-        for _, _, tr, part in due:
-            self._exit(tr, part)
-            changed.update(tr.outputs)
+        for moment, tr in due:
+            tr.exits.remove(moment)
+            for p, w in tr.outputs:
+                p.put(w)
+                changed.add(p)
+            for obs in self._observers:
+                obs.exited(tr, self.t, moment)
         return changed
 
-    def _exit(self, tr: Transition, part: Part | None) -> None:
-        tr.active -= 1
-        if tr.source is not None:
-            part = tr.source(self.t, self.rng)
-        for p in tr.outputs:
-            p.put(part if p.typed else None)
-        for obs in self._observers:
-            obs.exited(tr, part, self.t)
-        if part is not None and tr.releases_part:
-            for obs in self._observers:
-                obs.released(part, self.t)
-
-    def _enter_all(self, candidates: Iterable[Transition]) -> None:
+    def _enter(self, candidates: Iterable[Transition]) -> None:
         for group in _by_priority(candidates):
             while True:
                 enabled = [tr for tr in group if tr.enabled()]
                 if not enabled:
                     break
                 if len(enabled) == 1:
-                    self._enter(enabled[0])
+                    self._fire(enabled[0])
                 else:
-                    self._enter(self._order.choice(enabled))
+                    self._fire(self._order.choice(enabled))
 
-    def _enter(self, tr: Transition) -> None:
-        part: Part | None = None
-        for p in tr.inputs:
-            taken = p.take()
-            if taken is not None:
-                part = taken
-        delay = tr.delay.sample(part, self.rng)
+    def _fire(self, tr: Transition) -> None:
+        for p, w in tr.inputs:
+            p.take(w)
+        delay = tr.delay.sample(self.stream(tr.delay.stream))
         if delay < 0:
-            raise ValueError(f"від'ємна затримка переходу {tr.name}: {delay}")
+            raise ValueError(f"від’ємна затримка {tr.name}: {delay}")
+        moment = self.t + delay
+        tr.exits.append(moment)
         self._seq += 1
-        heapq.heappush(self._calendar, (self.t + delay, self._seq, tr, part))
-        tr.active += 1
+        heapq.heappush(self._nearest, (moment, self._seq, tr))
         for obs in self._observers:
-            obs.entered(tr, part, self.t)
+            obs.entered(tr, self.t, moment)

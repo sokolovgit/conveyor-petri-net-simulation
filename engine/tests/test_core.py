@@ -2,34 +2,26 @@ from collections.abc import Sequence
 from random import Random
 
 import pytest
-from spn import (
-    Constant,
-    Exponential,
-    FromPart,
-    Net,
-    Observer,
-    Part,
-    Place,
-    Simulator,
-    Transition,
-    exponential,
-)
+from spn import Constant, Exponential, Net, Observer, Place, Simulator, Transition, exponential
 
 
 class Recorder(Observer):
     def __init__(self) -> None:
         self.exits: list[tuple[str, float]] = []
-        self.left: list[tuple[Part, float]] = []
+        self.entries: list[tuple[str, float, float]] = []
 
-    def exited(self, transition: Transition, part: Part | None, t: float) -> None:
-        self.exits.append((transition.name, t))
+    def entered(self, tr: Transition, t: float, moment: float) -> None:
+        self.entries.append((tr.name, t, moment))
 
-    def released(self, part: Part, t: float) -> None:
-        self.left.append((part, t))
+    def exited(self, tr: Transition, t: float, moment: float) -> None:
+        self.exits.append((tr.name, t))
 
 
-def new_part(t: float, rng: Random) -> Part:
-    return Part(t_in=t, tau=exponential(1.0, rng))
+class Negative:
+    stream = "delay"
+
+    def sample(self, rng: Random) -> float:
+        return -1.0
 
 
 def test_constant_delay_cycle_exits_on_schedule() -> None:
@@ -40,14 +32,38 @@ def test_constant_delay_cycle_exits_on_schedule() -> None:
     assert [time for _, time in rec.exits] == [2.0, 4.0, 6.0, 8.0, 10.0]
 
 
-def test_multichannel_transition_takes_all_tokens_at_once() -> None:
+def test_multichannel_transition_keeps_one_exit_moment_per_channel() -> None:
     p, q = Place("P", 3), Place("Q")
     t = Transition("T", [p], [q], Constant(1.0))
     sim = Simulator(Net([p, q], [t]), seed=1)
     sim.run(0.5)
-    assert (p.count, t.active, q.count) == (0, 3, 0)
+    assert (p.count, t.exits, q.count) == (0, [1.0, 1.0, 1.0], 0)
     sim.run(1.0)
-    assert (t.active, q.count) == (0, 3)
+    assert (t.exits, q.count) == ([], 3)
+
+
+def test_exit_moments_are_the_state_of_the_transition() -> None:
+    g, a, b = Place("G", 1), Place("A"), Place("B")
+    arrive = Transition("arrive", [g], [g, a], Constant(0.5))
+    move = Transition("move", [a], [b], Constant(1.2))
+    sim = Simulator(Net([g, a, b], [arrive, move]), seed=1)
+    sim.run(1.6)
+    assert move.exits == pytest.approx([1.7, 2.2, 2.7])
+    assert b.count == 0
+
+
+def test_arc_weights_take_and_put_given_number_of_tokens() -> None:
+    p, q = Place("P", 5), Place("Q")
+    t = Transition("T", [(p, 2)], [(q, 3)], Constant(1.0))
+    Simulator(Net([p, q], [t]), seed=1).run(1.0)
+    assert (p.count, q.count) == (1, 6)
+
+
+def test_transition_needs_tokens_for_its_arc_weight() -> None:
+    p, q = Place("P", 1), Place("Q")
+    t = Transition("T", [(p, 2)], [q], Constant(0.0))
+    Simulator(Net([p, q], [t]), seed=1).run(1.0)
+    assert (p.count, q.count) == (1, 0)
 
 
 @pytest.mark.parametrize("seed", range(20))
@@ -70,34 +86,25 @@ def test_equal_priorities_resolved_at_random() -> None:
     assert 0.4 < wins / 400 < 0.6
 
 
-def test_parts_leave_queue_in_arrival_order() -> None:
-    parts = [Part(t_in=float(i), tau=1.0) for i in range(3)]
-    queue, free = Place("Q", typed=True, parts=parts), Place("F", 1)
-    serve = Transition("serve", [queue, free], [free], FromPart())
-    rec = Recorder()
-    Simulator(Net([queue, free], [serve]), seed=1, observers=[rec]).run(10.0)
-    assert rec.left == [(parts[0], 1.0), (parts[1], 2.0), (parts[2], 3.0)]
+def test_simultaneous_exits_happen_in_random_order() -> None:
+    orders = set()
+    for seed in range(50):
+        p1, p2, q = Place("P1", 1), Place("P2", 1), Place("Q")
+        a = Transition("a", [p1], [q], Constant(1.0))
+        b = Transition("b", [p2], [q], Constant(1.0))
+        rec = Recorder()
+        Simulator(Net([p1, p2, q], [a, b]), seed=seed, observers=[rec]).run(1.0)
+        orders.add(tuple(name for name, _ in rec.exits))
+    assert orders == {("a", "b"), ("b", "a")}
 
 
-def test_source_creates_part_when_transition_fires() -> None:
-    g, a = Place("G", 1), Place("A", typed=True)
-    arrive = Transition("arrive", [g], [g, a], Constant(0.5), source=new_part)
-    Simulator(Net([g, a], [arrive]), seed=1).run(1.6)
-    assert [part.t_in for part in a.parts] == [0.5, 1.0, 1.5]
-
-
-def test_returned_part_is_taken_before_part_arriving_at_same_moment() -> None:
-    returned = Part(t_in=-5.0, tau=1.0)
-    away = Place("X", typed=True, parts=[returned])
-    g, a0, a1, free = Place("G", 1), Place("A0", typed=True), Place("A1", typed=True), Place("F", 1)
-    back = Transition("back", [away], [a1], Constant(5.0))
-    arrive = Transition("arrive", [g], [g, a0], Constant(5.0), source=new_part)
-    to_belt = Transition("to_belt", [a0], [a1], Constant(0.0))
-    process = Transition("process", [a1, free], [free], FromPart())
-    rec = Recorder()
-    net = Net([away, g, a0, a1, free], [arrive, to_belt, back, process])
-    Simulator(net, seed=1, observers=[rec]).run(6.5)
-    assert rec.left[0] == (returned, 6.0)
+def test_all_exits_happen_before_any_entry() -> None:
+    p1, p2, q, r = Place("P1", 1), Place("P2", 1), Place("Q"), Place("R")
+    a = Transition("a", [p1], [q], Constant(1.0))
+    b = Transition("b", [p2], [q], Constant(1.0))
+    take_two = Transition("take_two", [(q, 2)], [r], Constant(0.0))
+    Simulator(Net([p1, p2, q, r], [a, b, take_two]), seed=3).run(1.0)
+    assert (q.count, r.count) == (0, 1)
 
 
 def test_moments_closer_than_tolerance_are_simultaneous() -> None:
@@ -112,19 +119,31 @@ def test_moments_closer_than_tolerance_are_simultaneous() -> None:
     assert times["second"] == times["direct"]
 
 
+def test_named_streams_are_independent_of_other_delays() -> None:
+    def service_delays(extra_delays: bool) -> list[float]:
+        g, q, f, x = Place("G", 1), Place("Q"), Place("F", 1), Place("X", 1)
+        arrive = Transition("arrive", [g], [g, q], Constant(1.0))
+        serve = Transition("serve", [q, f], [f], Exponential(0.5, stream="service"))
+        trs = [arrive, serve]
+        if extra_delays:
+            trs.append(Transition("noise", [x], [x], Exponential(0.3)))
+        rec = Recorder()
+        Simulator(Net([g, q, f, x], trs), seed=5, observers=[rec]).run(20.0)
+        return [m - t for name, t, m in rec.entries if name == "serve"]
+
+    assert service_delays(False) == service_delays(True)
+
+
 class TimeAverages(Observer):
     def __init__(
         self,
         places: Sequence[Place] = (),
-        transitions: Sequence[Transition] = (),
         *,
         warmup: float = 0.0,
     ) -> None:
         self._places = tuple(places)
-        self._transitions = tuple(transitions)
         self._warmup = warmup
         self._place_area = [0.0] * len(self._places)
-        self._transition_area = [0.0] * len(self._transitions)
         self.observed = 0.0
 
     def advance(self, t0: float, t1: float) -> None:
@@ -135,14 +154,9 @@ class TimeAverages(Observer):
         self.observed += dt
         for i, p in enumerate(self._places):
             self._place_area[i] += p.count * dt
-        for i, tr in enumerate(self._transitions):
-            self._transition_area[i] += tr.active * dt
 
     def place_mean(self, place: Place) -> float:
         return self._place_area[self._places.index(place)] / self.observed
-
-    def transition_mean(self, transition: Transition) -> float:
-        return self._transition_area[self._transitions.index(transition)] / self.observed
 
 
 def test_mm1_queue_matches_analytic_solution() -> None:
@@ -176,22 +190,21 @@ def test_exponential_generator_has_requested_mean() -> None:
     assert sum(exponential(2.5, rng) for _ in range(n)) / n == pytest.approx(2.5, rel=0.01)
 
 
-def test_invalid_delays_rejected() -> None:
+def test_invalid_delays_and_arcs_rejected() -> None:
     with pytest.raises(ValueError):
         Constant(-1.0)
     with pytest.raises(ValueError):
         Exponential(0.0)
     with pytest.raises(ValueError):
-        FromPart().sample(None, Random(1))
+        Transition("T", [(Place("P"), 0)], [], Constant(1.0))
 
 
-@pytest.mark.parametrize("seed", range(10))
-def test_parts_leaving_together_keep_their_order(seed: int) -> None:
-    parts = [Part(t_in=float(i), tau=1.0) for i in range(4)]
-    a, b = Place("A", typed=True, parts=parts), Place("B", typed=True)
-    move = Transition("move", [a], [b], Constant(1.0))
-    Simulator(Net([a, b], [move]), seed=seed).run(2.0)
-    assert b.parts == tuple(parts)
+def test_net_rejects_foreign_places_and_duplicate_names() -> None:
+    p, q = Place("P"), Place("Q")
+    with pytest.raises(ValueError):
+        Net([p], [Transition("T", [p], [q], Constant(1.0))])
+    with pytest.raises(ValueError):
+        Net([p, Place("P")], [])
 
 
 def test_negative_marking_rejected() -> None:
@@ -202,7 +215,7 @@ def test_negative_marking_rejected() -> None:
 
 
 def test_negative_delay_stops_simulation() -> None:
-    a, b = Place("A", typed=True, parts=[Part(t_in=0.0, tau=-1.0)]), Place("B", typed=True)
-    move = Transition("move", [a], [b], FromPart())
+    a, b = Place("A", 1), Place("B")
+    move = Transition("move", [a], [b], Negative())
     with pytest.raises(ValueError):
         Simulator(Net([a, b], [move]), seed=1).run(1.0)

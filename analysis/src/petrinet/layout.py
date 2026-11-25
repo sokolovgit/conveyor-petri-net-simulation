@@ -1,6 +1,6 @@
 from conveyor import ConveyorParams
 from conveyor import build as build_model
-from spn import Constant, Exponential, FromPart, Transition
+from spn import Constant, Exponential, Transition
 
 from petrinet import pnml
 
@@ -19,7 +19,7 @@ def _place_xy(name: str) -> tuple[float, float]:
         case "G":
             return X_A - 380, Y1 - 90
         case "A":
-            return (X_A - 190, Y1 - 90) if i == 0 else (X_A, _row(i))
+            return X_A, _row(i)
         case "B":
             return X_Q, _row(i)
         case "E":
@@ -37,8 +37,6 @@ def _transition_xy(tr: Transition) -> tuple[float, float]:
     name = tr.name
     if name == "Надходження":
         return X_A - 280, Y1 - 90
-    if name == "На стрічку":
-        return X_A - 90, Y1 - 90
     if name == "Повернення":
         return X_RET, Y_RET
     kind, rest = name.split(" ", 1)
@@ -59,8 +57,6 @@ def _delay(tr: Transition, t_ob: float) -> dict[str, float | str]:
             return {"delay": value}
         case Exponential(mean):
             return {"delay": mean, "dist": "exp"}
-        case FromPart():
-            return {"delay": t_ob, "dist": "exp"}
     raise TypeError(f"{tr.name}: затримку {tr.delay!r} не можна записати в PNML")
 
 
@@ -68,11 +64,12 @@ def build(n: int = 5, b: list[int] | None = None, lam: float = 4.0, t_ob: float 
     params = ConveyorParams(buffers=tuple(b or [0] * n), lam=lam, t_ob=t_ob)
     model = build_model(params)
     out = pnml.Net(f"conveyor_n{n}")
-    places = {p.name: out.place(p.name, *_place_xy(p.name), mark=p.count) for p in model.net.places}
-    for tr in model.net.transitions:
+    places = {p.name: out.place(p.name, *_place_xy(p.name), mark=p.count) for p in model.places}
+    for tr in model.transitions:
         t = out.transition(tr.name, *_transition_xy(tr), priority=tr.priority, **_delay(tr, t_ob))
-        for p in tr.inputs:
-            out.inp(places[p.name], t)
-        for p in tr.outputs:
-            out.out(t, places[p.name])
+        for p, w in tr.inputs:
+            out.inp(places[p.name], t, w)
+        for p, w in tr.outputs:
+            out.out(t, places[p.name], w)
     return out
+

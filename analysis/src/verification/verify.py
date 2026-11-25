@@ -160,13 +160,15 @@ VARIANTS = [
 class InSystem(Observer):
     def __init__(self, model: ConveyorNet, bin_width: float, until: float) -> None:
         self._m = model
-        self._carriers = (model.to_belt, *model.accept, *model.process, *model.moves, model.back)
+        self._carriers = (*model.accept, *model.process, *model.moves, model.back)
         self._width = bin_width
         self.area = [0.0] * round(until / bin_width)
 
     def advance(self, t0: float, t1: float) -> None:
         m = self._m
-        count = sum(p.count for p in (*m.belt, *m.queues)) + sum(tr.active for tr in self._carriers)
+        count = sum(p.count for p in (*m.belt, *m.queues)) + sum(
+            len(tr.exits) for tr in self._carriers
+        )
         while t0 < t1:
             k = int(t0 // self._width)
             end = min(t1, (k + 1) * self._width)
@@ -179,7 +181,7 @@ def _in_system_series(task: tuple[float, int]) -> list[float]:
     lam, seed = task
     model = build(ConveyorParams(lam=lam))
     observer = InSystem(model, SERIES_BIN, SERIES_UNTIL)
-    Simulator(model.net, seed=seed, observers=[observer]).run(SERIES_UNTIL)
+    Simulator(model, seed=seed, observers=[observer]).run(SERIES_UNTIL)
     return [a / SERIES_BIN for a in observer.area]
 
 
@@ -264,10 +266,10 @@ def check(runs: pd.DataFrame, series: pd.DataFrame) -> tuple[int, float]:
     steady = [f"v{i}" for i, v in enumerate(VARIANTS) if not v.overloaded]
     variant_runs = runs[runs.group.isin(steady)]
     little = (
-        (variant_runs.in_system_mean - variant_runs.throughput * variant_runs.sojourn_mean).abs()
-        / variant_runs.in_system_mean
+        (variant_runs.sojourn_sample_mean - variant_runs.sojourn_mean).abs()
+        / variant_runs.sojourn_mean
     ).max()
-    print(f"формула Літтла: найбільше відносне відхилення {little:.2e}")
+    print(f"середнє значень W проти накопиченої суми: найбільше відносне відхилення {little:.2e}")
     print(
         "розкид W між прогонами, найбільший відносний: "
         f"{(spread / means.sojourn_mean)[steady].max():.3f}"

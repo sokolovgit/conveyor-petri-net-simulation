@@ -4,7 +4,7 @@ from typing import Any, cast
 import pytest
 from conveyor import ConveyorParams, build, simulate
 from conveyor.net import ConveyorNet
-from spn import Observer, Part, Simulator, Transition
+from spn import Observer, Simulator, Transition
 
 
 class InvariantChecker(Observer):
@@ -15,37 +15,41 @@ class InvariantChecker(Observer):
     def advance(self, t0: float, t1: float) -> None:
         m = self.model
         for i, b in enumerate(m.params.buffers):
-            busy = m.process[i].active
+            busy = len(m.process[i].exits)
             assert m.free[i].count + busy == 1
             assert m.queues[i].count + m.slots[i].count + busy == b + 1
         self.intervals += 1
 
 
 class PartLog(Observer):
-    def __init__(self, arrive: Transition) -> None:
-        self.arrive = arrive
-        self.created: list[Part] = []
+    def __init__(self, model: ConveyorNet) -> None:
+        self.model = model
+        self.created = 0
         self.left = 0
+        self.service: list[float] = []
 
-    def exited(self, transition: Transition, part: Part | None, t: float) -> None:
-        if transition is self.arrive and part is not None:
-            self.created.append(part)
+    def entered(self, tr: Transition, t: float, moment: float) -> None:
+        if tr in self.model.process:
+            self.service.append(moment - t)
 
-    def released(self, part: Part, t: float) -> None:
-        self.left += 1
+    def exited(self, tr: Transition, t: float, moment: float) -> None:
+        if tr is self.model.arrive:
+            self.created += 1
+        elif tr in self.model.process:
+            self.left += 1
 
 
 def parts_in_system(model: ConveyorNet) -> int:
-    carriers = (model.to_belt, *model.accept, *model.process, *model.moves, model.back)
+    carriers = (*model.accept, *model.process, *model.moves, model.back)
     queued = sum(p.count for p in (*model.belt, *model.queues))
-    return queued + sum(tr.active for tr in carriers)
+    return queued + sum(len(tr.exits) for tr in carriers)
 
 
 def test_net_matches_formal_model() -> None:
     model = build(ConveyorParams(buffers=(0, 1, 2)))
-    net = model.net
+    net = model
     assert [p.name for p in net.places] == [
-        "G", "A0", "A1", "A2", "A3", "B1", "B2", "B3", "E1", "E2", "E3",
+        "G", "A1", "A2", "A3", "B1", "B2", "B3", "E1", "E2", "E3",
         "F1", "F2", "F3", "N1", "N2", "N3", "R",
     ]  # fmt: skip
     assert [model.slots[i].count for i in range(3)] == [1, 2, 3]
@@ -60,21 +64,22 @@ def test_net_matches_formal_model() -> None:
 def test_invariants_hold_after_every_event(buffers: tuple[int, ...]) -> None:
     model = build(ConveyorParams(buffers=buffers))
     checker = InvariantChecker(model)
-    Simulator(model.net, seed=3, observers=[checker]).run(3_000.0)
+    Simulator(model, seed=3, observers=[checker]).run(3_000.0)
     assert checker.intervals > 10_000
 
 
 @pytest.mark.parametrize("params", [ConveyorParams(), ConveyorParams.uniform(5, 1)])
 def test_littles_law(params: ConveyorParams) -> None:
     r = simulate(params, warmup=1_000.0, duration=10_000.0, seed=5)
-    assert r.in_system_mean == pytest.approx(r.throughput * r.sojourn_mean, rel=0.01)
+    assert r.in_system_mean == pytest.approx(r.throughput * r.sojourn_mean)
+    assert r.sojourn_sample_mean == pytest.approx(r.sojourn_mean, rel=0.01)
 
 
 def test_every_created_part_is_released_or_still_inside() -> None:
     model = build(ConveyorParams())
-    log = PartLog(model.arrive)
-    Simulator(model.net, seed=2, observers=[log]).run(2_000.0)
-    assert len(log.created) == log.left + parts_in_system(model)
+    log = PartLog(model)
+    Simulator(model, seed=2, observers=[log]).run(2_000.0)
+    assert log.created == log.left + parts_in_system(model)
     assert sum(p.count for p in model.done) == log.left
 
 
@@ -104,14 +109,16 @@ def test_sojourn_time_matches_independent_models(
     assert low < r.sojourn_mean < high
 
 
-def test_same_parts_in_every_buffer_configuration() -> None:
-    def created(params: ConveyorParams) -> list[Part]:
+def test_same_service_times_in_every_buffer_configuration() -> None:
+    def service(params: ConveyorParams) -> list[float]:
         model = build(params)
-        log = PartLog(model.arrive)
-        Simulator(model.net, seed=11, observers=[log]).run(500.0)
-        return log.created
+        log = PartLog(model)
+        Simulator(model, seed=11, observers=[log]).run(500.0)
+        return log.service[:1_500]
 
-    assert created(ConveyorParams()) == created(ConveyorParams(buffers=(0, 0, 0, 0, 10)))
+    assert service(ConveyorParams()) == pytest.approx(
+        service(ConveyorParams(buffers=(0, 0, 0, 0, 10)))
+    )
 
 
 def test_same_seed_reproduces_result() -> None:
@@ -124,7 +131,9 @@ def test_same_seed_reproduces_result() -> None:
 def test_sojourn_samples_kept_on_request() -> None:
     r = simulate(ConveyorParams(), warmup=100.0, duration=500.0, seed=1, keep_sojourn=True)
     assert len(r.sojourn) == r.completed
-    assert sum(r.sojourn) / r.completed == pytest.approx(r.sojourn_mean)
+    assert sum(r.sojourn) / r.completed == pytest.approx(r.sojourn_sample_mean)
+    assert len(r.before_service) == r.completed
+    assert all(0 <= d < w for d, w in zip(r.before_service, r.sojourn, strict=True))
 
 
 @pytest.mark.parametrize(
@@ -157,14 +166,15 @@ def test_overload_parts_pile_up_and_output_stays_below_input() -> None:
 def test_large_configuration_keeps_invariants_and_parts() -> None:
     model = build(ConveyorParams.uniform(8, 10, lam=8.0))
     checker = InvariantChecker(model)
-    log = PartLog(model.arrive)
-    Simulator(model.net, seed=12, observers=[checker, log]).run(2_000.0)
+    log = PartLog(model)
+    Simulator(model, seed=12, observers=[checker, log]).run(2_000.0)
     assert checker.intervals > 20_000
-    assert len(log.created) == log.left + parts_in_system(model)
+    assert log.created == log.left + parts_in_system(model)
 
 
 def test_deterministic_service_light_load_gives_exact_sojourn() -> None:
     r = simulate(ConveyorParams(lam=0.05, service="det"), warmup=100.0, duration=5_000.0, seed=1)
-    assert r.sojourn_mean == pytest.approx(1.0)
+    assert r.sojourn_sample_mean == pytest.approx(1.0)
+    assert r.sojourn_mean == pytest.approx(1.0, rel=1e-3)
     assert r.sojourn_std == pytest.approx(0.0, abs=1e-9)
     assert r.returns_mean == 0

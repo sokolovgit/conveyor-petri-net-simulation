@@ -52,7 +52,7 @@ def _run(args: argparse.Namespace) -> None:
 def _trace(args: argparse.Namespace) -> None:
     model = build(_params(args))
     tracer = Tracer((*model.belt, *model.queues, *model.free, model.returns), until=args.until)
-    Simulator(model.net, seed=args.seed, observers=[tracer]).run(args.until)
+    Simulator(model, seed=args.seed, observers=[tracer]).run(args.until)
     print("\n".join(tracer.lines()))
 
 
